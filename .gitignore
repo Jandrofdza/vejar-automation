@@ -1,0 +1,19 @@
+# OS
+.DS_Store
+
+# env & secrets
+.env
+.env.*.local
+.supabase
+*.local
+*.secret
+
+# node / tooling
+node_modules/
+npm-debug.log*
+yarn.lock
+pnpm-lock.yaml
+
+# build artifacts
+dist/
+out/
