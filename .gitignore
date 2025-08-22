@@ -17,3 +17,4 @@ pnpm-lock.yaml
 # build artifacts
 dist/
 out/
+.idea/
