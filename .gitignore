@@ -21,3 +21,13 @@ out/
 
 # Supabase CLI temp
 supabase/.temp/
+.DS_Store
+.env
+.env.*.local
+node_modules/
+npm-debug.log*
+yarn.lock
+pnpm-lock.yaml
+dist/
+out/
+supabase/.temp/
