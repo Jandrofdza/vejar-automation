@@ -1,0 +1,21 @@
+{
+  "name": "podio-cli",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node src/index.js",
+    "run": "node src/index.js run",
+    "files": "node src/index.js files",
+    "auth": "node src/index.js auth"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.46.1",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5",
+    "mime": "^4.0.4",
+    "openai": "^4.58.1",
+    "pdfjs-dist": "^4.10.38",
+    "undici": "^6.19.8"
+  }
+}
