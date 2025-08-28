@@ -1,156 +1,181 @@
+// deno-lint-ignore-file no-explicit-any
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import OpenAI from "npm:openai";
 
-async function getPodioToken() {
-  const form = new URLSearchParams({
+function env(k: string) {
+  const v = Deno.env.get(k);
+  if (!v) throw new Error(`Missing env ${k}`);
+  return v;
+}
+
+type PodioToken = { access_token: string };
+type PodioField = { field_id: number; type: string; external_id?: string; label?: string };
+
+const sb = createClient(env("SUPABASE_URL"), env("SUPABASE_SERVICE_ROLE_KEY"));
+
+async function getPodioToken(): Promise<PodioToken> {
+  const body = new URLSearchParams({
     grant_type: "app",
-    client_id: Deno.env.get("PODIO_CLIENT_ID")!,
-    client_secret: Deno.env.get("PODIO_CLIENT_SECRET")!,
-    app_id: Deno.env.get("PODIO_APP_ID")!,
-    app_token: Deno.env.get("PODIO_APP_TOKEN")!,
+    client_id: env("PODIO_CLIENT_ID"),
+    client_secret: env("PODIO_CLIENT_SECRET"),
+    app_id: env("PODIO_APP_ID"),
+    app_token: env("PODIO_APP_TOKEN"),
   });
   const r = await fetch("https://api.podio.com/oauth/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: form.toString(),
+    body: body.toString(),
   });
-  if (!r.ok) throw new Error(`Podio auth: ${r.status} ${await r.text()}`);
-  return await r.json() as { access_token: string };
+  if (!r.ok) throw new Error(`Podio auth ${r.status}: ${await r.text()}`);
+  return await r.json();
 }
 
-Deno.serve(async () => {
-  const sb = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-  );
-  const openai = new OpenAI({ apiKey: Deno.env.get("OPENAI_API_KEY")! });
+async function getAppFields(appId: string, token: string): Promise<PodioField[]> {
+  const r = await fetch(`https://api.podio.com/app/${appId}`, {
+    headers: { Authorization: `OAuth2 ${token}` },
+  });
+  if (!r.ok) throw new Error(`getAppFields ${r.status}: ${await r.text()}`);
+  const j = await r.json();
+  if (!Array.isArray(j.fields)) throw new Error("App response missing .fields[]");
+  return j.fields as PodioField[];
+}
 
+async function putField(itemId: number, fieldId: number, value: string, token: string) {
+  const url = `https://api.podio.com/item/${itemId}/value/${fieldId}`;
+  const r = await fetch(url, {
+    method: "PUT",
+    headers: { Authorization: `OAuth2 ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(value),
+  });
+  if (!r.ok) throw new Error(`PUT field_id=${fieldId} → ${r.status} ${await r.text()}`);
+}
+
+function norm(s?: string) {
+  return (s ?? "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/\p{Diacritic}/gu, "")
+    .trim();
+}
+
+function pick(fields: PodioField[]) {
+  const byExt: Record<string, PodioField> = {};
+  const byLabel: Record<string, PodioField> = {};
+  for (const f of fields) {
+    if (f.external_id) byExt[norm(f.external_id)] = f;
+    if (f.label) byLabel[norm(f.label)] = f;
+  }
+  const findText = (cands: string[]) =>
+    cands.map(c => byExt[norm(c)] || byLabel[norm(c)]).find(f => f && f.type === "text");
+
+  return {
+    fraccion: findText(["fraccion-2","fraccion arancelaria","fraccion-arancelaria","fraccion"]),
+    analisis: findText(["analisis","descripcion-tecnica","descripcion","alternativas"]),
+    criterio: findText(["criterio-tlc","criterio tlc","criterio"]),
+    notas:    findText(["notas-del-clasificador","notas","comentarios"]),
+  };
+}
+
+const SCHEMA = {
+  name: "ClasificacionPodio",
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      fraccion_arancelaria: { type: "string" },
+      descripcion_tecnica:  { type: "string" },
+      criterio_tlc:         { type: "string" },
+      notas_del_clasificador: { type: "string" },
+    },
+    required: ["fraccion_arancelaria","descripcion_tecnica","criterio_tlc","notas_del_clasificador"],
+  },
+  strict: true,
+} as const;
+
+async function classify(files: any[]) {
+  const messages = [
+    {
+      role: "system",
+      content:
+        "Eres un clasificador aduanal experto. Devuelve SOLO el JSON solicitado, sin claves extra.",
+    },
+    {
+      role: "user",
+      content:
+        "Rellena los campos del reporte de Podio usando los documentos adjuntos. " +
+        "Claves válidas: fraccion_arancelaria, descripcion_tecnica, criterio_tlc, notas_del_clasificador. " +
+        "NO incluyas: umc, riesgos, pais_origen, etc.\n\n" +
+        `Archivos: ${JSON.stringify(files).slice(0, 3000)}`,
+    },
+  ];
+
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages,
+    response_format: { type: "json_schema", json_schema: SCHEMA },
+    temperature: 0.2,
+  });
+
+  const raw = resp.choices[0]?.message?.content || "{}";
+  return JSON.parse(raw) as {
+    fraccion_arancelaria?: string;
+    descripcion_tecnica?: string;
+    criterio_tlc?: string;
+    notas_del_clasificador?: string;
+  };
+}
+
+serve(async (req) => {
   try {
-    // claim next queued job
-    const { data: jobs, error: jerr } = await sb
+    if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+
+    const { data: job } = await sb
       .from("jobs")
       .select("*")
       .eq("status", "queued")
       .order("created_at", { ascending: true })
-      .limit(1);
-    if (jerr) throw jerr;
-    if (!jobs?.length) return new Response("No queued jobs", { status: 200 });
+      .limit(1)
+      .single();
 
-    const job = jobs[0];
+    if (!job) return new Response("No queued jobs");
     await sb.from("jobs").update({ status: "processing" }).eq("id", job.id);
 
-    // get item → files[]
-    const { access_token } = await getPodioToken();
-    const itemResp = await fetch(`https://api.podio.com/item/${job.podio_item_id}`, {
-      headers: { Authorization: `OAuth2 ${access_token}` },
-    });
-    if (!itemResp.ok)
-      throw new Error(`Podio get item: ${itemResp.status} ${await itemResp.text()}`);
-    const item = await itemResp.json();
-    const files = Array.isArray(item.files) ? item.files : [];
+    const files: any[] = [];
 
-    // download each file and upload to Supabase Storage
-    const rows: any[] = [];
-    for (const f of files) {
-      const fileId = f.file_id ?? f.file?.file_id ?? f.id;
-      const name = f.name ?? f.file_name ?? `podio_file_${fileId}`;
-      const mime = f.mimetype ?? f.mime_type ?? "application/octet-stream";
+    const token = (await getPodioToken()).access_token;
+    const fields = await getAppFields(env("PODIO_APP_ID"), token);
+    const map = pick(fields);
 
-      const metaResp = await fetch(`https://api.podio.com/file/${fileId}`, {
-        headers: { Authorization: `OAuth2 ${access_token}` },
-      });
-      if (!metaResp.ok)
-        throw new Error(`file meta ${fileId}: ${metaResp.status} ${await metaResp.text()}`);
-      const meta = await metaResp.json();
-      const fileUrl =
-        (meta.link || `https://files.podio.com/${fileId}`) + `?oauth_token=${access_token}`;
+    const out = await classify(files);
 
-      const bin = await fetch(fileUrl);
-      if (!bin.ok)
-        throw new Error(`file download ${fileId}: ${bin.status} ${await bin.text()}`);
-      const arr = new Uint8Array(await bin.arrayBuffer());
-
-      const storage_path = `${job.podio_item_id}/${name}`;
-      const up = await sb.storage.from("podio_uploads").upload(storage_path, arr, {
-        contentType: mime,
-        upsert: true,
-      });
-      if (up.error) throw up.error;
-
-      rows.push({
-        job_id: job.id,
-        podio_file_id: fileId,
-        file_name: name,
-        mime,
-        storage_path,
-        size_bytes: arr.byteLength,
-      });
+    const itemId = Number(job.podio_item_id);
+    if (out.fraccion_arancelaria && map.fraccion) {
+      await putField(itemId, map.fraccion.field_id, out.fraccion_arancelaria, token);
     }
-    if (rows.length) {
-      const { error } = await sb.from("files").insert(rows);
-      if (error) throw error;
+    if (out.descripcion_tecnica && map.analisis) {
+      await putField(itemId, map.analisis.field_id, out.descripcion_tecnica, token);
     }
-
-    // GPT classification (baseline)
-    const summary = rows
-      .map((r) => `${r.file_name} (${r.mime}, ${r.size_bytes} bytes)`)
-      .join("\n");
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content:
-            "Eres un clasificador aduanal experto en comercio exterior mexicano. Devuelve JSON válido.",
-        },
-        {
-          role: "user",
-          content:
-            `Datos del webhook:\n${JSON.stringify(job.payload)}\n\n` +
-            `Archivos:\n${summary}\n\n` +
-            `Devuelve JSON: { fraccion_arancelaria, umc, pais_origen, riesgos, notas }`,
-        },
-      ],
-      response_format: { type: "json_object" },
-    });
-    const parsed = JSON.parse(completion.choices[0].message?.content || "{}");
+    if (out.criterio_tlc && map.criterio) {
+      await putField(itemId, map.criterio.field_id, out.criterio_tlc, token);
+    }
+    if (out.notas_del_clasificador && map.notas) {
+      await putField(itemId, map.notas.field_id, out.notas_del_clasificador, token);
+    }
 
     await sb.from("results").upsert({
       job_id: job.id,
       model_version: "gpt-4o-mini",
-      raw_json: parsed,
+      raw_json: out,
     });
+
     await sb.from("jobs").update({ status: "done" }).eq("id", job.id);
-
-    // post a comment back to Podio (best-effort)
-    try {
-      const { access_token: t2 } = await getPodioToken();
-      await fetch(`https://api.podio.com/comment/item/${job.podio_item_id}/`, {
-        method: "POST",
-        headers: { Authorization: `OAuth2 ${t2}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          value:
-            "Clasificación automática:\n```json\n" +
-            JSON.stringify(parsed, null, 2) +
-            "\n```",
-        }),
-      });
-    } catch (e) {
-      console.error("comment failed:", e);
-    }
-
-    return new Response("ok", { status: 200 });
+    return new Response("ok");
   } catch (e: any) {
-    // DEBUG CATCH: echo the error back as JSON and record it on the job
-    const msg = String(e?.message || e);
-    console.error("worker error:", msg);
+    console.error("worker error:", e?.message || e);
     try {
-      await sb
-        .from("jobs")
-        .update({ status: "error", error: msg })
-        .eq("status", "processing");
+      await sb.from("jobs").update({ status: "error", error: String(e?.message || e) }).eq("status", "processing");
     } catch {}
-    return new Response(JSON.stringify({ error: msg }), {
+    return new Response(JSON.stringify({ error: String(e?.message || e) }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
     });
