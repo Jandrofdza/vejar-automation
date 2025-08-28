@@ -14,3 +14,7 @@ supabase/.temp/
 # macOS / editor
 .DS_Store
 *.swp
+.env
+node_modules/
+.DS_Store
+
