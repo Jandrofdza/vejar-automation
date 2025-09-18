@@ -354,3 +354,39 @@ entrypoint = "./functions/process-job/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/process-job/*.html" ]
+
+[functions.podio-hook]
+enabled = true
+verify_jwt = true
+import_map = "./functions/podio-hook/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/podio-hook/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/podio-hook/*.html" ]
+
+[functions.health]
+enabled = true
+verify_jwt = true
+import_map = "./functions/health/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/health/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/health/*.html" ]
+
+[functions.storage-hook]
+enabled = true
+verify_jwt = true
+import_map = "./functions/storage-hook/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/storage-hook/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/storage-hook/*.html" ]
+
+[functions.get-podio-token]
+verify_jwt = false
